@@ -78,29 +78,69 @@ class IntelligentWebsiteTester:
         
         try:
             headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.5',
+                'Accept-Encoding': 'gzip, deflate',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1',
             }
             
-            response = requests.get(url, headers=headers, timeout=10)
+            response = requests.get(url, headers=headers, timeout=15)
             response.raise_for_status()
             
             soup = BeautifulSoup(response.content, 'html.parser')
             
-            # Extract different types of content
+            # Extract different types of content with better selectors
             content = {
+                'url': url,
                 'title': soup.title.string if soup.title else 'No title found',
-                'headings': [h.get_text().strip() for h in soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6'])],
-                'paragraphs': [p.get_text().strip() for p in soup.find_all('p') if p.get_text().strip()],
-                'links': [a.get('href') for a in soup.find_all('a', href=True)],
-                'buttons': [btn.get_text().strip() for btn in soup.find_all(['button', 'input']) if btn.get_text().strip()],
+                'headings': [h.get_text().strip() for h in soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6']) if h.get_text().strip()],
+                'paragraphs': [p.get_text().strip() for p in soup.find_all(['p', 'div', 'span']) if p.get_text().strip() and len(p.get_text().strip()) > 20],
+                'links': [a.get('href') for a in soup.find_all('a', href=True) if a.get('href').startswith(('http', '/', '#'))],
+                'buttons': [btn.get_text().strip() for btn in soup.find_all(['button', 'input', 'a']) if btn.get_text().strip()],
                 'meta_description': soup.find('meta', attrs={'name': 'description'})['content'] if soup.find('meta', attrs={'name': 'description'}) else 'No description found',
                 'images': [img.get('alt', 'No alt text') for img in soup.find_all('img') if img.get('alt')],
                 'forms': len(soup.find_all('form')),
                 'total_text': soup.get_text()[:5000]  # First 5000 characters for analysis
             }
             
+            # Filter out empty or very short content
+            content['paragraphs'] = [p for p in content['paragraphs'] if len(p) > 10]
+            content['headings'] = [h for h in content['headings'] if len(h) > 2]
+            content['buttons'] = [b for b in content['buttons'] if len(b) > 1]
+            
+            # If no content found, try alternative selectors
+            if not content['paragraphs'] and not content['headings']:
+                self.console.print("⚠️  [yellow]No content found with standard selectors, trying alternative methods...[/yellow]")
+                
+                # Try to find any text content
+                all_text = soup.get_text()
+                if all_text:
+                    # Split by lines and find meaningful content
+                    lines = [line.strip() for line in all_text.split('\n') if line.strip() and len(line.strip()) > 10]
+                    content['paragraphs'] = lines[:10]  # Take first 10 meaningful lines
+                
+                # Try to find any headings or titles
+                if not content['headings']:
+                    # Look for any text that might be headings
+                    potential_headings = []
+                    for tag in soup.find_all(['div', 'span', 'p']):
+                        text = tag.get_text().strip()
+                        if text and len(text) < 100 and any(char.isupper() for char in text[:10]):
+                            potential_headings.append(text)
+                    content['headings'] = potential_headings[:5]
+            
             self.scraped_content = content
-            self.log_test_result("Content Scraping", "PASS", f"Extracted {len(content['paragraphs'])} paragraphs, {len(content['headings'])} headings")
+            
+            # Provide more detailed logging
+            total_content = len(content['paragraphs']) + len(content['headings']) + len(content['buttons'])
+            
+            if total_content > 0:
+                self.log_test_result("Content Scraping", "PASS", f"Extracted {len(content['paragraphs'])} paragraphs, {len(content['headings'])} headings, {len(content['buttons'])} buttons")
+            else:
+                self.log_test_result("Content Scraping", "WARNING", "Limited content found - site may use JavaScript or be protected")
+            
             return True
             
         except Exception as e:
@@ -117,28 +157,53 @@ class IntelligentWebsiteTester:
         try:
             content = self.scraped_content
             
-            # Prepare content for analysis
-            analysis_prompt = f"""
-            Analyze this website content and provide insights in the following format:
+            # Check if we have meaningful content to analyze
+            total_content = len(content.get('paragraphs', [])) + len(content.get('headings', []))
             
-            Website Title: {content['title']}
-            Meta Description: {content['meta_description']}
-            
-            Main Headings: {content['headings'][:10]}
-            Key Paragraphs: {content['paragraphs'][:5]}
-            Interactive Elements: {content['buttons'][:10]}
-            Forms Found: {content['forms']}
-            
-            Please provide:
-            1. Website Purpose (1-2 sentences)
-            2. Key Features (bullet points)
-            3. Target Audience
-            4. Content Quality Assessment
-            5. User Experience Insights
-            6. Technical Observations
-            
-            Format the response in a clear, structured way suitable for terminal display.
-            """
+            if total_content == 0:
+                # Handle case where no content was scraped
+                analysis_prompt = f"""
+                Analyze this website based on available information:
+                
+                Website Title: {content.get('title', 'Unknown')}
+                Meta Description: {content.get('meta_description', 'No description available')}
+                URL: {content.get('url', 'Unknown')}
+                
+                Content Status: No readable content was extracted (likely JavaScript-heavy or protected site)
+                
+                Please provide:
+                1. Website Purpose (based on title and URL)
+                2. Technical Assessment (why content might not be accessible)
+                3. Recommendations for testing
+                4. User Experience Considerations
+                5. Security/Protection Analysis
+                
+                Format the response in a clear, structured way suitable for terminal display.
+                Focus on what we can learn from the available information.
+                """
+            else:
+                # Standard analysis with content
+                analysis_prompt = f"""
+                Analyze this website content and provide insights in the following format:
+                
+                Website Title: {content.get('title', 'Unknown')}
+                Meta Description: {content.get('meta_description', 'No description available')}
+                
+                Main Headings: {content.get('headings', [])[:10]}
+                Key Paragraphs: {content.get('paragraphs', [])[:5]}
+                Interactive Elements: {content.get('buttons', [])[:10]}
+                Forms Found: {content.get('forms', 0)}
+                
+                Please provide:
+                1. Website Purpose (1-2 sentences)
+                2. Key Features (bullet points)
+                3. Target Audience
+                4. Content Quality Assessment
+                5. User Experience Insights
+                6. Technical Observations
+                
+                Format the response in a clear, structured way suitable for terminal display.
+                """
             
             with Progress(
                 SpinnerColumn(),
